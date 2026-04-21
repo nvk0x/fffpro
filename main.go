@@ -55,6 +55,7 @@ func main() {
 	wg.Wait()
 }
 
+
 func worker(jobs <-chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for rawURL := range jobs {
@@ -69,6 +70,7 @@ func processURL(rawURL string) {
 		return
 	}
 
+	// skip dead hosts quickly
 	if !isHostAlive(req.URL.Host) {
 		return
 	}
@@ -89,7 +91,10 @@ func processURL(rawURL string) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
 
 	if *ignoreEmpty && len(bytes.TrimSpace(body)) == 0 {
 		return
@@ -102,10 +107,17 @@ func processURL(rawURL string) {
 	}
 }
 
+
 func saveResponse(req *http.Request, resp *http.Response, body []byte) {
 
 	hash := sha1.Sum([]byte(req.Method + req.URL.String()))
-	name := fmt.Sprintf("%x", hash)
+
+	safePath := sanitizePath(req.URL.Path)
+	if safePath == "" || safePath == "/" {
+		safePath = "root"
+	}
+
+	name := fmt.Sprintf("%s_%x", safePath, hash)
 
 	dir := filepath.Join(*outputDir, req.URL.Hostname())
 	os.MkdirAll(dir, 0755)
@@ -113,7 +125,14 @@ func saveResponse(req *http.Request, resp *http.Response, body []byte) {
 	bodyPath := filepath.Join(dir, name+".body")
 	headerPath := filepath.Join(dir, name+".headers")
 
-	os.WriteFile(bodyPath, body, 0644)
+	fbody, err := os.Create(bodyPath)
+	if err != nil {
+		return
+	}
+	defer fbody.Close()
+
+	fbody.WriteString("URL: " + req.URL.String() + "\n\n")
+	fbody.Write(body)
 
 	f, err := os.Create(headerPath)
 	if err != nil {
@@ -131,7 +150,20 @@ func saveResponse(req *http.Request, resp *http.Response, body []byte) {
 	}
 
 	f.WriteString(b.String())
+
+	logIndex(bodyPath, req.URL.String())
 }
+
+func logIndex(path, url string) {
+	f, err := os.OpenFile("index.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	f.WriteString(fmt.Sprintf("%s -> %s\n", path, url))
+}
+
 
 func createHTTPClient(timeout time.Duration) *http.Client {
 
@@ -157,6 +189,7 @@ func createHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
+
 func isHostAlive(host string) bool {
 	conn, err := net.DialTimeout("tcp", host+":80", 3*time.Second)
 	if err != nil {
@@ -167,4 +200,16 @@ func isHostAlive(host string) bool {
 	}
 	conn.Close()
 	return true
+}
+
+func sanitizePath(p string) string {
+	p = strings.Trim(p, "/")
+	p = strings.ReplaceAll(p, "/", "_")
+	p = strings.ReplaceAll(p, ".", "_")
+
+	if len(p) > 100 {
+		p = p[:100]
+	}
+
+	return p
 }
